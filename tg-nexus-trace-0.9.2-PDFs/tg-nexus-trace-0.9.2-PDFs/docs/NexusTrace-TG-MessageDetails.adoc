@@ -1,0 +1,117 @@
+= Nexus Messages (Details)
+Version 0.1
+:doctype: book
+:encoding: utf-8
+:lang: en
+:toc: left
+:toclevels: 4
+:numbered:
+:xrefstyle: short
+:le: &#8804;
+:rarr: &#8658;
+
+This chapter is using plain C-style identifiers for messages and message fields. Nexus is using *B-TYPE*, while here we have *BTYPE*. It will make references to code (both C and VHDL) easier. Message fields are shown in ‘sending order’ (left to right => first to last) - Nexus SPEC is showing tables with *TCODE* (as is sent first) in last row.
+
+== TODO (as provided by emails)
+
+From Robert (2020/11/17):
+
+. List "RISC-V applicable" values of key fields (EVCODE ,ETYPE, etc.).
+. Clarify 'ProgramCorrelation' use-cases (so it will not be 'over-used').
+. Provide rationale for max size for variable fields.
+. Elaborate more on 'ICNT' and 'HIST' overflows.
+. Clarify 3 profiles? ('standard' = most compatible with Nexus recommended sizes/values, better=still compatible, but more 'dense', extended=allowing non-compatible 'trickery').
+.. All profiles should be handled by NexRv reference code.
+.Clarify focus on 'standard' as first goal and optimizations and tricks later.
+
+From Jean-Luc (2020/11/18):
+
+. In the message table, some messages that are compulsory in level 1 are no longer generated when we are in higher level. We should make this appear somehow in the table. For instance, if we generate branch history messages, we will not generate direct branch messages (can we say we implement them if they are never generated ?). This may also impact the resource full replacement (below).
+. For ProgramCorrelation field, we should mention that when we are in level3, we will dump HIST messages (doesn’t appear in your table)
+. For EVCODE, those that make sense to us are: entry in debug mode (0), entry in low-power mode (1, after having executed a wfi), program trace disable (4).
+.. This means we plan to send a ProgramCorrelation message when we execute a wfi instructions. This may generate a lot of traffic if we wfi/wake-up very often, but it might be interesting to dump the trace if the processor will idle for a long period. We might consider further control of this feature. But, as the processor will stop for at least a few cycles, it should not be a problem in terms of bandwidth to flush the history. Maybe an issue in multi-core?
+.For the behaviour in case of resource full, we would add a “2b” in case of level 3. Since we don’t generate direct branch messages, we would rather send a “fake” indirect branch message (or a real one if it happen simultaneously to the resource full). The history buffer would be dumped in this indirect branch message. The decoder would see that there is not indirect branch at the current pc and understand that this is a flush. This way we can avoid TCODE=27.
+
+.There are special cases that we should try to illustrate (e.g. ProgramCorreclation to be generated due to debug stop on an indirect branch instruction causing an ICNT overflow…). There might be some priorities to define to know which message should be generated.
+
+From Jay (2020/11/19):
+
+. Could we omit the SYNC fields all together to save on message bandwidth? In previous Freescale/NXP Power ISA based Nexus designs this field was not included. Most of these events could be implied with other messages. Typically when the “event” is seen, the next branch trace was message was “upgraded” to sync type. For example:
+.. Exit from System Reset – Program Trace Sync message with Reset vector
+.. Following a Resource Full message(instruction count), next branch message upgraded to sync. (This will be a level 1 now)
+.. FIFO overrun or Message contention should produce an error message, first trace message following Error message should be upgraded to sync type.
+. Could we also omit the BTYPE fields? Similar, this info could be implied?
+. I like the idea of Optimized Variant, but favor the A,B,C config approach you mentioned in the meeting or enabled via control bit in a Developmental Control Register.
+. In Power ISA, we also used a Program Correlation Message EVCODE(10) for when a “Branch and Link” instruction executed when history trace mode was enabled.
+.. Do we need a message (could be Program Correlation) to convey CPU mode?
+. Further optimization/compression of branch message in history mode can be achieved with a return stack buffer for sub routines, this is more for further discussions.
+
+== Fields in Messages
+
+[#Fields in Messages]
+.Fields in Messages
+[width = "100%", options = header]
+|==========================================================================================
+| Message/Field Name   |TCODE|SRC|SYNC|BTYPE|Other(rare)      |ICNT|xADDR|HIST|TSTAMP|Level
+|                  Size|[6]  |[M]|[4] |[2]  |                 |[v] |[v]  |[v] |[v]   |
+|Ownership             |2    |   |    |     |PROCESS[v]       |    |     |    |      |2
+|DirectBranch          |3    |   |    |     |                 |Yes |     |    |      |1
+|IndirectBranch        |4    |   |    |Yes  |                 |Yes |UADDR|    |      |1
+|Error                 |8    |   |    |     |ETYPE[4]+PAD[v]  |    |     |    |      |1
+|ProgamTraceSync       |9    |   |Yes |     |                 |Yes |FADDR|    |      |1
+|DirectBranchSync      |11   |   |Yes |     |                 |Yes |FADDR|    |      |1
+|IndirectBranchSync    |12   |   |Yes |Yes  |                 |Yes |FADDR|    |      |1
+|ResourceFull          |27   |   |    |     |RCODE[4]+RDATA[v]|    |     |    |      |2
+|IndirectBranchHist    |28   |   |    |Yes  |                 |Yes |UADDR|Yes |      |3
+|IndirectBranchHistSync|29   |   |Yes |Yes  |                 |Yes |FADDR|Yes |      |3
+|RepeatBranch          |30   |   |    |     |BCNT[v]          |    |     |    |      |4
+|ProgramCorrelation    |33   |   |    |     |EVCODE[4]+CDF[2] |Yes |     |    |      |1
+|==========================================================================================
+
+*Fields:* [n] – fixed size field, [v] – variable size field, [M] – only for multi-hart/core trace
+
+*Levels:*	1 (compulsory), 2 (optional), 3 (adds branch history), 4 (adds repeated branch)
+
+NOTE: Nexus SPEC define CANCEL and MAP fields. Both are not applicable. CANCEL is used to cancel speculative execution, while ingress-port provides retired instructions. MAP field is for many address spaces (we have only one code space).
+
+== Details of Fields
+
+[#Details of Fields]
+.Details of Fields
+[width = "100%", options = header]
+|======================================================================================================
+| Field Name | Standard Size | Description | Values / Notes | Optimized Variant
+| TCODE      | 6             | Message Type | Provided above | 4 or 3 (for level1)
+| SRC        | Vendor        | Source of message(only for multi - hart trace) | Hart index or trace ID | Max number of harts
+| SYNC       | 4             | Reason for Synchronization|Always with FADDR field | 2
+| BTYPE      | 2             | Branch Type | For indirect branches only | 1
+| ICNT       | Variable      | Number of 16 - bit half - instructions executed | | Max 4 + 6 + 6 bits
+| FADDR      | Variable      | Full PC address(without LSB bit) | Always with SYNC field |
+| UADDR      | Variable      | Update of PC address(XOR with recent xADDR drop) | Always with BTYPE field |
+| HIST       | Variable      | Direct Branch History bit-map (LSB denotes last branch) | MSB = 1 is 'end-guardian' | Max 5 * 6 bits
+| TSTAMP     | Variable      | Timestamp(optional) | See Timestamp chapter |
+5+| Other Fields
+| PROCESS    | Variable      | ID of thread | | Max 6 + 6 bits
+| ETYPE      | 4             | Type of error | | 1 (just overflow)
+| PAD        | Variable      | Just padding(always 0) to assure TSTAMP is aligned | |
+| RCODE      | 4             | Resource full code (ICNT and/or HIST overflow) | | 1
+| RDATA      | Variable      | Data for full resource (either I - CNT or HIST) | | Max 5 + 6 bits
+| BCNT       | Variable      | Number of times previous message is repeated | |
+| EVCODE     | 4             | Reason to generate Program Correlation || 1
+| CDF        | 2             | Number of CDATA | Always '0' | For alignment only
+|======================================================================================================
+
+== Possible Handling of ICNT and HIST Overflows
+
+In case ICNT or HIST counter overflows(for single message), there are the following possibilities:
+
+. Counter keeps counting(from 1 again) and *ResourceFull* message is emitted – it may happen many times.
+.. IMPORTANT : Periodic SYNC-message must ‘break’ this sequence.
+. Normal *DirectBranch* message is emitted (but decoder will know that branch was not reached at PC determined by *ICNT*).
+. Artificial SYNC-message is emitted (this is only OK for *ICNT* overflows in level ‘1’ – this is rare to have a lot of linear instructions).
+
+== Possible Omission of ICNT Field (for better compression)
+
+. This is only idea – may not be correct in all corner cases.
+. In case of *DirecBranch* and *History...* messages, it is really not necessary to know number of instructions needed to reach next branch as it may be found while following types of instructions.
+. This may be variants of *TCODE* which allow skipping *ICNT* to be treated as  pure extension.
